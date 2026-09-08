@@ -230,6 +230,16 @@ function squatch_media_retriever_page() {
 		echo '<div class="retriever-description">';
 		echo 'Original images will be retained and the WebP version will be created alongside them.';
 		echo '</div>';
+
+		echo '<div class="form-field checkbox-field">';
+		echo '<label><strong>Original</strong></label>';
+		echo '<input type="checkbox" id="remove_original" name="remove_original" value="1">';
+		echo '<label for="remove_original">Remove original image after successful WebP conversion</label>';
+		echo '</div>';
+
+		echo '<div class="retriever-description">';
+		echo 'The original will only be removed after the WebP version has been successfully created.';
+		echo '</div>';
 	}
 
 	echo '<input type="hidden" name="_nonce" value="' . esc_attr(wp_create_nonce('squatch_retriever_nonce')) . '">';
@@ -297,6 +307,7 @@ function squatch_media_retriever_page() {
 			let skipped = 0;
 			let failed = 0;
 			var convertWebp = $('#convert_webp').is(':checked') ? 1 : 0;
+			var removeOriginal = $('#remove_original').is(':checked') ? 1 : 0;
 
 			function processBatch() {
 				$.ajax({
@@ -308,6 +319,7 @@ function squatch_media_retriever_page() {
 						start: start,
 						csv_file: csvFile,
 						convert_webp: convertWebp,
+						remove_original: removeOriginal,
 						_nonce: '<?php echo wp_create_nonce("squatch_retriever_nonce"); ?>'
 					},
 					success: function(res) {
@@ -380,6 +392,7 @@ function squatch_retrieve_media() {
 	$start = isset($_POST['start']) ? intval($_POST['start']) : 0;
 	$csv_file_url = isset($_POST['csv_file']) ? esc_url_raw($_POST['csv_file']) : '';
 	$convert_webp = !empty($_POST['convert_webp']);
+	$remove_original = !empty($_POST['remove_original']);
 
 	if(empty($csv_file_url)) {
 		wp_send_json_error(array(
@@ -445,45 +458,45 @@ function squatch_retrieve_media() {
 			continue;
 		}
 
-		$result = squatch_retriever_process_image($image_url, $convert_webp);
+		$result = squatch_retriever_process_image($image_url, $convert_webp, $remove_original);
 
-		if($result['status'] === 'retrieved') {
-			$retrieved++;
+		switch($result['status']) {
 
-			$output .= '#' . $row_number . ' <strong>RETRIEVED:</strong> ' . esc_html($result['filename']) . '<br />';
-			$output .= 'Source: ' . esc_html($image_url) . '<br />';
-			$output .= 'Destination: ' . esc_html($result['relative_path']) . '<br />';
+			case 'retrieved':
+				$retrieved++;
+				$output .= '#' . $row_number . ' <strong>RETRIEVED:</strong> ' . esc_html($result['filename']) . '<br />';
+				$output .= 'Source: ' . esc_html($image_url) . '<br />';
+				$output .= 'Destination: ' . esc_html($result['relative_path']) . '<br />';
+				if(!empty($result['webp'])) {
+					$output .= '&bull; <strong>WebP:</strong> ' . esc_html($result['webp']) . '<br />';
+				}
+				if(!empty($result['original_removed'])) {
+					$output .= '&bull; <strong>Original removed</strong><br />';
+				}
+				$output .= '<br />';
+				break;
 
-			if(!empty($result['webp'])) {
-				$output .= '&bull; <strong>WebP:</strong> ' . esc_html($result['webp']) . '<br />';
-			}
 
-			$output .= '<br />';
+			case 'exists':
+				$skipped++;
+				$output .= '#' . $row_number . ' <strong>SKIPPED (exists):</strong> ' . esc_html($result['filename']) . '<br />';
+				$output .= 'Destination: ' . esc_html($result['relative_path']) . '<br />';
+				if(!empty($result['webp'])) {
+					$output .= '&bull; <strong>WebP:</strong> ' . esc_html($result['webp']) . '<br />';
+				}
+				if(!empty($result['original_removed'])) {
+					$output .= '&bull; <strong>Original removed</strong><br />';
+				}
+				$output .= '<br />';
+				break;
 
-		} elseif($result['status'] === 'exists') {
-			$skipped++;
 
-			$output .= '#' . $row_number . ' <strong>SKIPPED (exists):</strong> ' . esc_html($result['filename']) . '<br />';
-			$output .= 'Destination: ' . esc_html($result['relative_path']) . '<br />';
-
-			if(!empty($result['webp'])) {
-				$output .= '&bull; <strong>WebP:</strong> ' . esc_html($result['webp']) . '<br />';
-			}
-
-			$output .= '<br />';
-
-		} elseif($result['status'] === 'webp_created') {
-			$retrieved++;
-
-			$output .= '#' . $row_number . ' <strong>WEBP CREATED:</strong> ' . esc_html($result['filename']) . '<br />';
-			$output .= 'Destination: ' . esc_html($result['relative_path']) . '<br />';
-			$output .= '&bull; <strong>WebP:</strong> ' . esc_html($result['webp']) . '<br /><br />';
-
-		} else {
-			$failed++;
-
-			$output .= '#' . $row_number . ' <strong>FAILED:</strong> ' . esc_html($image_url) . '<br />';
-			$output .= esc_html($result['message']) . '<br /><br />';
+			case 'failed':
+			default:
+				$failed++;
+				$output .= '#' . $row_number . ' <strong>FAILED:</strong> ' . esc_html($image_url) . '<br />';
+				$output .= esc_html($result['message']) . '<br /><br />';
+				break;
 		}
 	}
 
@@ -590,7 +603,7 @@ function squatch_retriever_read_csv_batch($csv_file, $start, $batch_size) {
 
 
 
-function squatch_retriever_process_image($image_url, $convert_webp = false) {
+function squatch_retriever_process_image($image_url, $convert_webp = false, $remove_original = false) {
 
 	$image_url = trim($image_url);
 
@@ -611,7 +624,6 @@ function squatch_retriever_process_image($image_url, $convert_webp = false) {
 	}
 
 	$uploads_marker = '/wp-content/uploads/';
-
 	$uploads_position = strpos($path, $uploads_marker);
 
 	if($uploads_position === false) {
@@ -633,8 +645,8 @@ function squatch_retriever_process_image($image_url, $convert_webp = false) {
 	}
 
 	$upload_dir = wp_upload_dir();
-	$destination = trailingslashit($upload_dir['basedir']) . $relative_path;
-
+	$upload_base_dir = trailingslashit($upload_dir['basedir']);
+	$destination = $upload_base_dir . $relative_path;
 	$destination_dir = dirname($destination);
 
 	if(!wp_mkdir_p($destination_dir)) {
@@ -644,33 +656,21 @@ function squatch_retriever_process_image($image_url, $convert_webp = false) {
 		);
 	}
 
-	$extension = strtolower(pathinfo($destination, PATHINFO_EXTENSION));
+	$webp_supported = squatch_media_retriever_webp_supported();
 	$webp_destination = preg_replace('/\.[^.]+$/', '.webp', $destination);
+	$webp_relative_path = str_replace($upload_base_dir, '', $webp_destination);
 
 	/*
-	 * If WebP is requested and the WebP already exists, consider this
-	 * complete even if the original image does not exist locally.
+	 * If WebP conversion is requested and a valid WebP already exists,
+	 * the image is already converted. If requested, remove the original.
 	 */
-	if($convert_webp && squatch_media_retriever_webp_supported() && file_exists($webp_destination)) {
-		return array(
-			'status' => 'exists',
-			'filename' => basename($destination),
-			'relative_path' => $relative_path,
-			'webp' => str_replace(trailingslashit($upload_dir['basedir']), '', $webp_destination)
-		);
-	}
+	if($convert_webp && $webp_supported && file_exists($webp_destination) && filesize($webp_destination) > 0) {
 
-	/*
-	 * If the original already exists, don't download it again.
-	 * We can still attempt WebP conversion if requested.
-	 */
-	if(file_exists($destination) && filesize($destination) > 0) {
+		$original_removed = false;
 
-		$webp = '';
-
-		if($convert_webp && squatch_media_retriever_webp_supported()) {
-			if(squatch_retriever_create_webp($destination, $webp_destination)) {
-				$webp = str_replace(trailingslashit($upload_dir['basedir']), '', $webp_destination);
+		if($remove_original && file_exists($destination)) {
+			if(@unlink($destination)) {
+				$original_removed = true;
 			}
 		}
 
@@ -678,7 +678,44 @@ function squatch_retriever_process_image($image_url, $convert_webp = false) {
 			'status' => 'exists',
 			'filename' => basename($destination),
 			'relative_path' => $relative_path,
-			'webp' => $webp
+			'webp' => $webp_relative_path,
+			'original_removed' => $original_removed
+		);
+	}
+
+	/*
+	 * If the original already exists, don't download it again.
+	 * We can still create WebP and optionally remove the original.
+	 */
+	if(file_exists($destination) && filesize($destination) > 0) {
+
+		$webp = '';
+		$original_removed = false;
+
+		if($convert_webp && $webp_supported) {
+
+			if(file_exists($webp_destination) && filesize($webp_destination) > 0) {
+				$webp = $webp_relative_path;
+			} elseif(squatch_retriever_create_webp($destination, $webp_destination)) {
+				$webp = $webp_relative_path;
+			}
+
+			/*
+			 * Only remove the original if a valid WebP exists.
+			 */
+			if(!empty($webp) && $remove_original) {
+				if(@unlink($destination)) {
+					$original_removed = true;
+				}
+			}
+		}
+
+		return array(
+			'status' => 'exists',
+			'filename' => basename($destination),
+			'relative_path' => $relative_path,
+			'webp' => $webp,
+			'original_removed' => $original_removed
 		);
 	}
 
@@ -728,10 +765,21 @@ function squatch_retriever_process_image($image_url, $convert_webp = false) {
 	 * Optionally create WebP.
 	 */
 	$webp = '';
+	$original_removed = false;
 
-	if($convert_webp && squatch_media_retriever_webp_supported()) {
+	if($convert_webp && $webp_supported) {
+
 		if(squatch_retriever_create_webp($destination, $webp_destination)) {
-			$webp = str_replace(trailingslashit($upload_dir['basedir']), '', $webp_destination);
+			$webp = $webp_relative_path;
+
+			/*
+			 * Only remove the original after successful WebP creation.
+			 */
+			if($remove_original) {
+				if(@unlink($destination)) {
+					$original_removed = true;
+				}
+			}
 		}
 	}
 
@@ -739,7 +787,8 @@ function squatch_retriever_process_image($image_url, $convert_webp = false) {
 		'status' => 'retrieved',
 		'filename' => basename($destination),
 		'relative_path' => $relative_path,
-		'webp' => $webp
+		'webp' => $webp,
+		'original_removed' => $original_removed
 	);
 }
 
